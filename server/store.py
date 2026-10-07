@@ -24,6 +24,10 @@ DEFAULT_CRITERIA: dict[str, Any] = {
 }
 
 
+class SnapshotIncomplete(Exception):
+    """La validation d'une collecte référence des annonces jamais reçues."""
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -104,6 +108,36 @@ class Store:
                     updated += 1
         return {"inserted": inserted, "updated": updated}
 
+    def apply_snapshot(self, ids: list[str]) -> dict[str, int]:
+        """Remplace le contenu du Scanner par la collecte complète `ids`.
+
+        - toutes les annonces de `ids` doivent déjà avoir été reçues (sinon
+          SnapshotIncomplete et RIEN n'est supprimé) ;
+        - les annonces absentes de `ids` sont supprimées (et leur statut
+          new / ignored avec), SAUF celles marquées matched ou sold ;
+        - les statuts des annonces de `ids` ne sont jamais modifiés.
+        Le tout dans une seule transaction.
+        """
+        wanted = set(ids)
+        with self._lock, self._conn:
+            existing = {r[0] for r in self._conn.execute("SELECT id FROM listings")}
+            missing = wanted - existing
+            if missing:
+                raise SnapshotIncomplete(f"{len(missing)} annonce(s) de la collecte non reçue(s)")
+            kept_status = {r[0] for r in self._conn.execute(
+                "SELECT id FROM listing_status WHERE status IN ('matched', 'sold')")}
+            outdated = existing - wanted
+            removed = sorted(outdated - kept_status)
+            self._conn.executemany("DELETE FROM listings WHERE id = ?", [(i,) for i in removed])
+            self._conn.executemany("DELETE FROM listing_status WHERE id = ?", [(i,) for i in removed])
+            self._conn.execute(
+                "INSERT INTO kv (key, value) VALUES ('last_snapshot', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (json.dumps({"at": _now(), "count": len(wanted)}),),
+            )
+        return {"kept": len(wanted), "removed": len(removed),
+                "preservedMatched": len(outdated & kept_status)}
+
     def ingested(self, limit: int = 2000) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute(
@@ -123,7 +157,9 @@ class Store:
             count, last = self._conn.execute(
                 "SELECT COUNT(*), MAX(last_seen_at) FROM listings"
             ).fetchone()
-        return {"listings": count, "last_ingest_at": last}
+            snap = self._conn.execute("SELECT value FROM kv WHERE key = 'last_snapshot'").fetchone()
+        return {"listings": count, "last_ingest_at": last,
+                "last_snapshot": json.loads(snap[0]) if snap else None}
 
     def reset(self) -> None:
         with self._lock, self._conn:

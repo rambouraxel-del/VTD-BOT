@@ -23,10 +23,21 @@ User-Agent ni navigateur headless.
    Vinted (tri « plus récentes »).
 2. Garde les annonces qui respectent les critères (taille, prix max, marque,
    mots-clés) et ignore les annonces sponsorisées.
-3. Écarte celles déjà envoyées (IDs mémorisés dans le volume Docker `collector_data`).
-4. Envoie les nouvelles au VPS en HTTPS (`POST /api/ingest/listings`, en-tête `X-Ingest-Key`).
-   Si le VPS est injoignable, elles restent en attente et partent au passage suivant.
-5. Recommence toutes les `INTERVAL_SECONDS` (3 min par défaut, 1 min minimum,
+3. **Mode snapshot** : une fois les 4 recherches terminées avec succès, envoie
+   au VPS **toutes** les annonces retenues pendant ce cycle (pas seulement les
+   nouvelles), par lots (`POST /api/ingest/listings`, en-tête `X-Ingest-Key`) —
+   ces lots ne suppriment jamais rien.
+4. Puis valide la collecte (`POST /api/ingest/snapshot` avec la liste des IDs).
+   Le VPS vérifie qu'il a bien tout reçu, puis **le Scanner ne contient plus que
+   les annonces de ce cycle** : les anciennes annonces `new` et `ignored` qui n'en
+   font plus partie sont supprimées ; **toutes les annonces `matched` sont
+   conservées**, avec leur statut.
+5. Si une recherche échoue, si Vinted refuse l'accès ou si le collector est
+   arrêté pendant le cycle : **rien n'est envoyé ni nettoyé**.
+6. Si le VPS est injoignable : la collecte complète reste en attente (volume
+   Docker `collector_data`) et est renvoyée en entier au passage suivant (ou
+   remplacée par une collecte complète plus récente).
+7. Recommence toutes les `INTERVAL_SECONDS` (3 min par défaut, 1 min minimum,
    5 à 15 s entre deux recherches).
 
 **Protections Vinted** : en cas de refus (HTTP 401/403/429) ou de page de
@@ -44,9 +55,12 @@ en continu il fait une pause de 15 min, doublée à chaque nouveau refus (max 2 
 } ] }
 ```
 
-Le VPS calcule ensuite marge nette (frais acheteur + port déduits), ROI et score
+Validation de fin de cycle : `{ "snapshotId": "…", "ids": ["4567891234", …] }`
+(`POST /api/ingest/snapshot`). Réponse : annonces gardées, retirées, matchs conservés.
+
+Le VPS calcule marge nette (frais acheteur + port déduits), ROI et score
 (`server/scoring.py`), évite les doublons par ID Vinted et ne modifie jamais un
-statut matched / ignored existant.
+statut existant.
 
 ## Les 4 recherches (`collector/searches.json`)
 
@@ -111,7 +125,12 @@ docker compose run --rm collector --once
 ```
 
 La 1re commande construit l'image (une minute). Codes de sortie :
-`0` OK · `2` Vinted refuse l'accès · `3` envoi au VPS impossible (URL ou clé) · `4` configuration incomplète.
+`0` OK (collecte envoyée et validée) · `2` Vinted refuse l'accès · `3` envoi au VPS
+impossible (URL ou clé ; rien n'est nettoyé) · `4` configuration incomplète ·
+`5` cycle incomplet (une recherche en erreur ; rien envoyé ni nettoyé).
+
+En fin de one-shot réussi, la dernière ligne indique par exemple :
+`Collecte validée par le VPS : 12 annonce(s) dans le Scanner (dont 3 nouvelle(s)), 7 ancienne(s) retirée(s), 2 match(s) conservé(s) hors collecte`.
 
 Ensuite, ouvrir l'app sur l'iPhone : les annonces apparaissent dans le Scanner.
 Sur le VPS, `./scripts/check.sh` affiche la date de la dernière réception.
@@ -144,7 +163,7 @@ docker compose logs -f collector     # suivre l'activité (Ctrl+C pour quitter)
 docker compose ps                    # état (healthy = un passage depuis moins de 2 h)
 docker compose stop                  # pause
 docker compose up -d --build         # après une mise à jour (git pull)
-docker compose run --rm collector --once --reset-state   # oublier les IDs déjà envoyés
+docker compose run --rm collector --once --reset-state   # effacer l'état local (collecte en attente)
 ```
 
 Le PC doit rester allumé (et non en veille) pour que la collecte continue.

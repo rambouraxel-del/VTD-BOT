@@ -74,8 +74,19 @@ class FilterTest(unittest.TestCase):
                                 "Stüssy streetwear": ["08"]})
 
 
+def page(*ids: int, size: str = "M", price: float = 30) -> str:
+    """Page Vinted fictive (même format que la vraie) contenant des vestes TNF."""
+    items = [{"productItem": {
+        "id": i, "title": f"Veste The North Face {i}", "url": f"/items/{i}-veste",
+        "price": {"amount": str(price), "currencyCode": "EUR"},
+        "photos": [{"url": f"https://images.example.invalid/{i}.jpg"}],
+        "itemBox": {"firstLine": "The North Face", "secondLine": f"{size} · Très bon état"}}} for i in ids]
+    payload = '5:{"items":{"items":' + json.dumps(items) + '}}'
+    return "<html><script>self.__next_f.push([1," + json.dumps(payload) + "])</script></html>"
+
+
 class EndToEndTest(unittest.TestCase):
-    """collector (fixture) -> vrai pont API (server/api.py) en mémoire."""
+    """collector -> vrai pont API (server/api.py) en mémoire. Aucun accès à Vinted."""
 
     def setUp(self):
         sys.path.insert(0, str(HERE.parent / "server"))
@@ -88,50 +99,111 @@ class EndToEndTest(unittest.TestCase):
         handler = make_handler(self.api, api_key="a" * 40, cors_origins=[], ingest_key="i" * 40)
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.fixture = self.tmp / "page.txt"
         os.environ.update(VTD_API_URL=f"http://127.0.0.1:{self.server.server_port}",
                           INGEST_KEY="i" * 40, STATE_FILE=str(self.tmp / "state.json"))
+        self._post, self._batch = collector.post, collector.BATCH
 
     def tearDown(self):
+        collector.post, collector.BATCH = self._post, self._batch
         self.server.shutdown()
         self.server.server_close()
         for k in ("VTD_API_URL", "INGEST_KEY", "STATE_FILE"):
             os.environ.pop(k, None)
 
-    def run_once(self, *extra):
-        return collector.main(["--once", "--fixture", str(HERE / "fixtures" / "catalog_sample.txt"), *extra])
+    def run_once(self, text: str | None = None, *extra):
+        self.fixture.write_text(FIXTURE if text is None else text, "utf-8")
+        return collector.main(["--once", "--fixture", str(self.fixture), *extra])
 
-    def test_send_dedupe_and_statuses(self):
-        self.assertEqual(self.run_once(), 0)
-        feed = self.api.listings("new")
-        self.assertEqual(len(feed), 5)
-        state = json.loads((self.tmp / "state.json").read_text())
-        self.assertEqual((len(state["sent"]), state["pending"]), (5, []))
-        self.api.set_status("9000000001", "matched")
-        self.api.set_status("9000000004", "ignored")
-        # 2e passage : rien de nouveau, rien de renvoyé, statuts intacts
-        self.assertEqual(self.run_once(), 0)
-        self.assertEqual(len(self.api.store.ingested()), 5)
-        self.assertEqual(self.api.get("9000000001")["status"], "matched")
-        self.assertEqual(self.api.get("9000000004")["status"], "ignored")
-        # même après --reset-state, le VPS ne crée pas de doublon et garde les statuts
-        self.assertEqual(self.run_once("--reset-state"), 0)
-        self.assertEqual(len(self.api.store.ingested()), 5)
-        self.assertEqual(self.api.get("9000000001")["status"], "matched")
+    def ids(self, status="all"):
+        return sorted(l["id"] for l in self.api.listings(status))
 
-    def test_vps_down_keeps_pending(self):
+    def state(self):
+        return json.loads((self.tmp / "state.json").read_text())
+
+    def test_first_cycle_sends_everything(self):
+        self.assertEqual(self.run_once(), 0)
+        self.assertEqual(len(self.api.listings("new")), 5)
+        self.assertEqual((self.state()["pending"], len(self.state()["last_ids"])), (None, 5))
+
+    def test_every_cycle_resends_all_retained(self):
+        self.run_once(page(1, 2))
+        calls = []
+        def spy(cfg, path, payload):
+            calls.append((path, len(payload.get("listings", payload.get("ids", [])))))
+            return self._post(cfg, path, payload)
+        collector.post = spy
+        self.assertEqual(self.run_once(page(1, 2)), 0)  # rien de nouveau : tout est renvoyé quand même
+        self.assertEqual(calls, [("/api/ingest/listings", 2), ("/api/ingest/snapshot", 2)])
+
+    def test_snapshot_replaces_scanner_but_keeps_matched(self):
+        self.run_once(page(1, 2, 3, 4))
+        self.api.set_status("1", "matched")   # match absent du prochain cycle
+        self.api.set_status("2", "ignored")   # ignoré absent du prochain cycle
+        self.api.set_status("3", "ignored")   # ignoré toujours présent
+        self.api.set_status("4", "matched")   # match toujours présent
+        self.assertEqual(self.run_once(page(3, 4, 5)), 0)
+        self.assertEqual(self.ids("new"), ["5"])                       # Scanner = collecte actuelle
+        self.assertEqual(self.ids(), ["1", "3", "4", "5"])             # 2 supprimée
+        self.assertEqual(sorted(l["id"] for l in self.api.matches()), ["1", "4"])
+        self.assertEqual(self.api.get("3")["status"], "ignored")       # statut préservé
+        self.assertIsNone(self.api.get("2"))
+
+    def test_empty_complete_cycle_empties_scanner_only(self):
+        self.run_once(page(1, 2))
+        self.api.set_status("1", "matched")
+        self.assertEqual(self.run_once(page(7, size="XL")), 0)        # rien de retenu
+        self.assertEqual(self.ids(), ["1"])
+
+    def test_failed_search_means_no_send_no_cleanup(self):
+        self.run_once(page(1, 2))
+        self.assertEqual(self.run_once("<html>page inconnue</html>"), 5)
+        self.assertEqual(self.ids("new"), ["1", "2"])
+
+    def test_blocked_means_no_cleanup(self):
+        self.run_once(page(1, 2))
+        self.assertEqual(self.run_once("<title>Just a moment...</title>"), 2)
+        self.assertEqual(self.ids("new"), ["1", "2"])
+
+    def test_no_cleanup_between_batches_and_retry(self):
+        self.run_once(page(1, 2))
+        collector.BATCH = 2
+        def failing_snapshot(cfg, path, payload):
+            if path.endswith("/snapshot"):
+                raise collector.IngestError("VPS injoignable : test")
+            return self._post(cfg, path, payload)
+        collector.post = failing_snapshot
+        self.assertEqual(self.run_once(page(3, 4, 5, 6, 7)), 3)
+        # les lots sont arrivés, mais rien n'a été nettoyé : 1 et 2 sont toujours là
+        self.assertEqual(self.ids("new"), ["1", "2", "3", "4", "5", "6", "7"])
+        self.assertEqual(len(self.state()["pending"]["listings"]), 5)
+        # VPS revenu, Vinted en erreur ce coup-ci : la collecte complète en attente est validée
+        collector.post = self._post
+        self.assertEqual(self.run_once("<html>page inconnue</html>"), 5)
+        self.assertEqual(self.ids("new"), ["3", "4", "5", "6", "7"])
+        self.assertIsNone(self.state()["pending"])
+
+    def test_vps_down_then_newer_cycle_replaces_pending(self):
         os.environ["VTD_API_URL"] = "http://127.0.0.1:9"  # personne n'écoute
-        self.assertEqual(self.run_once(), 3)
-        state = json.loads((self.tmp / "state.json").read_text())
-        self.assertEqual((len(state["pending"]), state["sent"]), (5, {}))
+        self.assertEqual(self.run_once(page(1, 2)), 3)
+        self.assertEqual(len(self.state()["pending"]["listings"]), 2)
+        os.environ["VTD_API_URL"] = f"http://127.0.0.1:{self.server.server_port}"
+        self.assertEqual(self.run_once(page(2, 3)), 0)
+        self.assertEqual(self.ids("new"), ["2", "3"])
 
     def test_wrong_key(self):
         os.environ["INGEST_KEY"] = "x" * 40
         self.assertEqual(self.run_once(), 3)
 
     def test_dry_run_remembers_nothing(self):
-        self.assertEqual(self.run_once("--dry-run"), 0)
+        self.assertEqual(self.run_once(None, "--dry-run"), 0)
         self.assertFalse((self.tmp / "state.json").exists())
         self.assertEqual(self.api.store.ingested(), [])
+
+    def test_old_state_format_is_ignored(self):
+        (self.tmp / "state.json").write_text(json.dumps({"sent": {"1": "x"}, "pending": [{"id": "1"}]}))
+        self.assertEqual(self.run_once(page(1)), 0)
+        self.assertEqual(self.ids("new"), ["1"])
 
     def test_config_errors(self):
         os.environ["VTD_API_URL"] = "http://mon-vps.example"

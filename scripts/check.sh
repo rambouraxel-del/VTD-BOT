@@ -28,7 +28,7 @@ case "$code" in
   503) echo "⚠️ ingestion désactivée : INGEST_KEY absente (./scripts/add-ingest-key.sh)"; ok=1 ;;
   *)   echo "❌ réponse inattendue : $code"; ok=1 ;;
 esac
-echo "$health" | python3 -c "import json,sys; d=json.load(sys.stdin).get('data',{}); print('   dernière réception :', d.get('last_ingest_at') or 'jamais', '—', d.get('listings', 0), 'annonce(s) en base')" 2>/dev/null
+echo "$health" | python3 -c "import json,sys; d=json.load(sys.stdin).get('data',{}); s=d.get('last_snapshot') or {}; print('   dernière réception :', d.get('last_ingest_at') or 'jamais', '—', d.get('listings', 0), 'annonce(s) en base'); print('   dernière collecte validée :', s.get('at') or 'jamais', '—', s.get('count', 0), 'annonce(s)')" 2>/dev/null
 
 if [ "${SOURCE:-collector}" = "s4mh" ]; then
   echo; echo "== s4mh"

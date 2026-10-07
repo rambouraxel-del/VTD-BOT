@@ -27,7 +27,11 @@ Routes (JSON) :
     PUT   /api/criteria             {SearchCriteria}
     POST  /api/reset                remet tous les statuts à "new"
     POST  /api/ingest/listings      {"listings": [...]}  — réservé au collector,
-                                    en-tête `X-Ingest-Key: <INGEST_KEY>` (clé distincte)
+                                    en-tête `X-Ingest-Key: <INGEST_KEY>` (clé distincte).
+                                    Ajoute / met à jour, ne supprime jamais rien.
+    POST  /api/ingest/snapshot      {"ids": [...]}  — même clé. Envoyé UNE fois, après
+                                    tous les lots d'une collecte complète : le Scanner
+                                    ne garde que ces annonces (+ toutes les matched/sold).
 """
 
 from __future__ import annotations
@@ -44,7 +48,7 @@ from urllib.parse import urlsplit
 
 from scoring import evaluate
 from sources import CollectorSource, ListingSource, MockSource, S4mhSource
-from store import STATUSES, Store
+from store import STATUSES, SnapshotIncomplete, Store
 
 HERE = Path(__file__).resolve().parent
 
@@ -130,6 +134,7 @@ def criteria_from_query(q: dict[str, list[str]]) -> dict[str, Any] | None:
 #  Ingestion (collector -> pont)
 # --------------------------------------------------------------------------
 MAX_INGEST_ITEMS = 200
+MAX_SNAPSHOT_IDS = 10_000
 
 
 def _text(value: Any, limit: int) -> str:
@@ -193,6 +198,17 @@ def ingest(store: Store, payload: dict[str, Any]) -> dict[str, Any]:
     return {"received": len(items), "rejected": len(items) - len(valid), **result}
 
 
+def commit_snapshot(store: Store, payload: dict[str, Any]) -> dict[str, Any]:
+    """Fin de collecte complète : nettoyage du Scanner (voir Store.apply_snapshot)."""
+    ids = payload.get("ids")
+    if not isinstance(ids, list) or len(ids) > MAX_SNAPSHOT_IDS:
+        raise ValueError(f"champ `ids` (liste de {MAX_SNAPSHOT_IDS} IDs maximum) attendu")
+    clean = [str(i).strip() for i in ids]
+    if not all(i.isdigit() and len(i) <= 64 for i in clean):
+        raise ValueError("IDs Vinted invalides")
+    return store.apply_snapshot(clean)
+
+
 # --------------------------------------------------------------------------
 #  HTTP
 # --------------------------------------------------------------------------
@@ -254,7 +270,7 @@ def make_handler(api: ListingApi, *, api_key: str, cors_origins: list[str], inge
             if path == "/api/health" and self.command == "GET":
                 h = health(api)  # public : aucune donnée d'annonce
                 return self._send(200 if h["ok"] else 503, h)
-            if path == "/api/ingest/listings":
+            if path in ("/api/ingest/listings", "/api/ingest/snapshot"):
                 # Route du collector : SA clé uniquement (la clé de l'app ne suffit pas).
                 if not ingest_key:
                     return self._send(503, {"error": "ingestion désactivée (INGEST_KEY absente)"})
@@ -263,7 +279,12 @@ def make_handler(api: ListingApi, *, api_key: str, cors_origins: list[str], inge
                 if not self._ingest_authorized():
                     return self._send(401, {"error": "clé d'ingestion manquante ou invalide"})
                 try:
-                    return self._send(200, ingest(api.store, self._json(MAX_INGEST_BODY)))
+                    payload = self._json(MAX_INGEST_BODY)
+                    if path.endswith("/snapshot"):
+                        return self._send(200, commit_snapshot(api.store, payload))
+                    return self._send(200, ingest(api.store, payload))
+                except SnapshotIncomplete as exc:  # rien n'a été supprimé
+                    return self._send(409, {"error": str(exc)})
                 except (ValueError, json.JSONDecodeError) as exc:
                     return self._send(400, {"error": str(exc)})
             if not self._authorized():

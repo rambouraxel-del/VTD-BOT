@@ -18,13 +18,13 @@ import sys
 import tarfile
 import io
 
-from api import ListingApi, health, ingest, make_handler, normalize_ingested, read_api_key, read_ingest_key
+from api import ListingApi, commit_snapshot, health, ingest, make_handler, normalize_ingested, read_api_key, read_ingest_key
 from sources import CollectorSource, MockSource, S4mhSource, s4mh_row_to_listing
 
 KEY = "k" * 40
 INGEST = "i" * 40
 FRONT = "https://app.example.test"
-from store import Store
+from store import SnapshotIncomplete, Store
 
 FRONT_KEYS = {"id", "title", "brand", "size", "condition", "price", "resalePrice",
               "profit", "roi", "score", "imageUrl", "vintedUrl", "status", "tags"}
@@ -175,6 +175,48 @@ class IngestTest(unittest.TestCase):
         self.assertEqual(read_ingest_key(KEY), "")
 
 
+class SnapshotTest(unittest.TestCase):
+    def setUp(self):
+        self.api = make_collector_api()
+        ingest(self.api.store, {"listings": [raw_item(i) for i in range(1, 6)]})  # 1001..1005
+        self.api.set_status("1001", "matched")
+        self.api.set_status("1002", "sold")
+        self.api.set_status("1003", "ignored")
+        self.api.set_status("1004", "ignored")
+
+    def test_replace_keeps_matched_and_statuses(self):
+        ingest(self.api.store, {"listings": [raw_item(4), raw_item(6)]})
+        r = commit_snapshot(self.api.store, {"ids": ["1004", "1006"]})
+        self.assertEqual(r, {"kept": 2, "removed": 2, "preservedMatched": 2})
+        self.assertEqual(sorted(l["id"] for l in self.api.listings("all")), ["1001", "1002", "1004", "1006"])
+        self.assertEqual([l["id"] for l in self.api.listings("new")], ["1006"])
+        self.assertEqual(self.api.get("1004")["status"], "ignored")
+        self.assertIsNone(self.api.get("1003"))
+        self.assertNotIn("1003", self.api.store.statuses())   # statut ignoré nettoyé aussi
+        self.assertEqual(sorted(l["id"] for l in self.api.matches()), ["1001", "1002"])
+
+    def test_batches_alone_never_delete(self):
+        ingest(self.api.store, {"listings": [raw_item(9)]})
+        self.assertEqual(len(self.api.store.ingested()), 6)
+
+    def test_incomplete_snapshot_deletes_nothing(self):
+        with self.assertRaises(SnapshotIncomplete):
+            commit_snapshot(self.api.store, {"ids": ["1005", "1999"]})  # 1999 jamais reçue
+        self.assertEqual(len(self.api.store.ingested()), 5)
+        self.assertEqual(self.api.store.statuses()["1003"][0], "ignored")
+
+    def test_invalid_payload(self):
+        for bad in ({}, {"ids": "1001"}, {"ids": ["abc"]}, {"ids": ["1"] * 10_001}):
+            with self.assertRaises(ValueError):
+                commit_snapshot(self.api.store, bad)
+        self.assertEqual(len(self.api.store.ingested()), 5)
+
+    def test_empty_snapshot_keeps_only_matches(self):
+        commit_snapshot(self.api.store, {"ids": []})
+        self.assertEqual(sorted(l["id"] for l in self.api.listings("all")), ["1001", "1002"])
+        self.assertEqual(self.api.source.health()["last_snapshot"]["count"], 0)
+
+
 class IngestHttpTest(unittest.TestCase):
     def setUp(self):
         handler = make_handler(make_collector_api(), api_key=KEY, cors_origins=[], ingest_key=INGEST)
@@ -213,6 +255,25 @@ class IngestHttpTest(unittest.TestCase):
             self.get("/api/listings", INGEST)                                # n'ouvre pas l'app
         h = json.loads(urllib.request.urlopen(self.base + "/api/health").read())
         self.assertEqual((h["source"], h["data"]["listings"]), ("collector", 2))
+
+    def test_snapshot_route(self):
+        self.post({"listings": [raw_item(1), raw_item(2)]}, {"X-Ingest-Key": INGEST})
+        url = "/api/ingest/snapshot"
+        def snap(body, headers):
+            req = urllib.request.Request(self.base + url, method="POST", data=json.dumps(body).encode(),
+                                         headers={"Content-Type": "application/json", **headers})
+            try:
+                with urllib.request.urlopen(req) as res:
+                    return res.status, json.loads(res.read())
+            except urllib.error.HTTPError as e:
+                return e.code, json.loads(e.read() or b"null")
+        self.assertEqual(snap({"ids": ["1001"]}, {"X-API-Key": KEY})[0], 401)  # clé de l'app refusée
+        self.assertEqual(snap({"ids": ["1001", "1999"]}, {"X-Ingest-Key": INGEST})[0], 409)
+        self.assertEqual(len(self.get("/api/listings", KEY)), 2)               # rien supprimé
+        self.assertEqual(snap({"ids": "x"}, {"X-Ingest-Key": INGEST})[0], 400)
+        code, r = snap({"ids": ["1001"]}, {"X-Ingest-Key": INGEST})
+        self.assertEqual((code, r["kept"], r["removed"]), (200, 1, 1))
+        self.assertEqual([l["id"] for l in self.get("/api/listings", KEY)], ["1001"])
 
     def test_ingest_disabled_without_key(self):
         self.server.shutdown()

@@ -65,7 +65,8 @@ Sur iPhone : ouvrir l'URL dans Safari → Partager → « Sur l'écran d'accueil
 | GET | `/api/matches` | matchs (et vendus), plus récents en premier |
 | GET | `/api/brands` | marques disponibles |
 | GET / PUT | `/api/criteria` | critères enregistrés |
-| POST | `/api/ingest/listings` | **collector uniquement** (en-tête `X-Ingest-Key`) : ajoute / met à jour des annonces, sans doublon, sans toucher aux statuts |
+| POST | `/api/ingest/listings` | **collector uniquement** (en-tête `X-Ingest-Key`) : ajoute / met à jour des annonces, sans doublon, sans toucher aux statuts, sans rien supprimer |
+| POST | `/api/ingest/snapshot` | **collector uniquement** : fin de collecte complète, le Scanner ne garde que ces IDs (+ tous les matchs) |
 | POST | `/api/reset` | remet tous les statuts à « new » (tests) |
 
 ## Passer du mode mock au backend
@@ -136,7 +137,7 @@ docker compose config -q               # valide docker-compose.yml (nécessite u
 | Fichier | |
 |---|---|
 | `collector/vinted.py` | lecture d'une page de recherche Vinted (repris d'addictcode/vinted-telegram-bot) |
-| `collector/collector.py` | filtres, IDs déjà envoyés, envoi HTTPS, pauses en cas de refus, modes one-shot / continu |
+| `collector/collector.py` | filtres, mode snapshot (envoi de toute la collecte + validation), retry, pauses en cas de refus, modes one-shot / continu |
 | `collector/searches.json` | les 4 recherches (tailles M/L, prix max 50 €) |
 | `collector/docker-compose.yml`, `Dockerfile`, `.env.example` | lancement sur Windows ; profil `local` pour un test complet sur le PC |
 | `collector/fixtures/catalog_sample.txt` | page d'exemple fictive (tests sans Vinted) |
