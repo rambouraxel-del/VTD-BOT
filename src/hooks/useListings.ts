@@ -7,7 +7,9 @@ export function useListings() {
   const [feed, setFeed] = useState<Listing[]>([])
   const [matches, setMatches] = useState<Listing[]>([])
   const [criteria, setCriteria] = useState<SearchCriteria>(defaultCriteria)
+  const [brands, setBrands] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const [lastSwiped, setLastSwiped] = useState<Listing | null>(null)
 
   const refresh = useCallback(async (c: SearchCriteria) => {
@@ -17,11 +19,18 @@ export function useListings() {
   }, [])
 
   useEffect(() => {
-    listingService.getCriteria().then(async (c) => {
-      setCriteria(c)
-      await refresh(c)
-      setLoading(false)
-    })
+    ;(async () => {
+      try {
+        const [c, b] = await Promise.all([listingService.getCriteria(), listingService.getBrands()])
+        setCriteria(c)
+        setBrands(b)
+        await refresh(c)
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e))
+      } finally {
+        setLoading(false)
+      }
+    })()
   }, [refresh])
 
   const swipe = useCallback(async (listing: Listing, dir: 'left' | 'right') => {
@@ -60,5 +69,5 @@ export function useListings() {
     await refresh(criteria)
   }, [criteria, refresh])
 
-  return { feed, matches, criteria, loading, canUndo: !!lastSwiped, swipe, undo, removeMatch, updateCriteria, resetAll }
+  return { feed, matches, criteria, brands, loading, error, canUndo: !!lastSwiped, swipe, undo, removeMatch, updateCriteria, resetAll }
 }

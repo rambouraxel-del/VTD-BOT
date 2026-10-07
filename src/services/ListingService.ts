@@ -12,6 +12,8 @@ export interface ListingService {
   getMatches(): Promise<Listing[]>
   /** Change le statut d'une annonce (match, ignore, vendue, ou retour à "new"). */
   setStatus(id: string, status: ListingStatus): Promise<void>
+  /** Marques disponibles (pour l'écran Critères). */
+  getBrands(): Promise<string[]>
   getCriteria(): Promise<SearchCriteria>
   saveCriteria(criteria: SearchCriteria): Promise<void>
   /** Remet toutes les annonces à "new" (utile pour les tests). */

@@ -1,0 +1,77 @@
+"""Stockage propre au pont : statuts des annonces et critères.
+
+s4mh n'a pas de notion de statut new/matched/ignored/sold : on le garde ici,
+dans une petite base SQLite séparée (on ne touche jamais à la base s4mh).
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import threading
+from datetime import datetime, timezone
+from typing import Any
+
+STATUSES = ("new", "matched", "ignored", "sold")
+
+DEFAULT_CRITERIA: dict[str, Any] = {
+    "keywords": "",
+    "brands": [],
+    "maxPrice": 1000,
+    "minProfit": 0,
+    "minRoi": 0,
+    "minScore": 0,
+}
+
+
+class Store:
+    def __init__(self, path: str) -> None:
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(path, check_same_thread=False)
+        self._conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS listing_status (
+                id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            """
+        )
+
+    def statuses(self) -> dict[str, tuple[str, str]]:
+        with self._lock:
+            rows = self._conn.execute("SELECT id, status, updated_at FROM listing_status")
+            return {r[0]: (r[1], r[2]) for r in rows}
+
+    def set_status(self, listing_id: str, status: str) -> None:
+        if status not in STATUSES:
+            raise ValueError(f"statut invalide : {status}")
+        with self._lock, self._conn:
+            if status == "new":
+                self._conn.execute("DELETE FROM listing_status WHERE id = ?", (listing_id,))
+            else:
+                self._conn.execute(
+                    "INSERT INTO listing_status (id, status, updated_at) VALUES (?, ?, ?) "
+                    "ON CONFLICT(id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at",
+                    (listing_id, status, datetime.now(timezone.utc).isoformat()),
+                )
+
+    def reset(self) -> None:
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM listing_status")
+
+    def criteria(self) -> dict[str, Any]:
+        with self._lock:
+            row = self._conn.execute("SELECT value FROM kv WHERE key = 'criteria'").fetchone()
+        return {**DEFAULT_CRITERIA, **(json.loads(row[0]) if row else {})}
+
+    def save_criteria(self, criteria: dict[str, Any]) -> dict[str, Any]:
+        merged = {k: criteria.get(k, v) for k, v in DEFAULT_CRITERIA.items()}
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO kv (key, value) VALUES ('criteria', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (json.dumps(merged),),
+            )
+        return merged

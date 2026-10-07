@@ -14,6 +14,12 @@ export default function App() {
       <main>
         {s.loading ? (
           <div className="empty">Chargement…</div>
+        ) : s.error ? (
+          <div className="empty">
+            <div className="empty-icon">📡</div>
+            <h2>Serveur injoignable</h2>
+            <p>{s.error}</p>
+          </div>
         ) : tab === 'feed' ? (
           <FeedScreen
             feed={s.feed}
@@ -26,7 +32,7 @@ export default function App() {
         ) : tab === 'matches' ? (
           <MatchesScreen matches={s.matches} onRemove={s.removeMatch} />
         ) : (
-          <CriteriaScreen criteria={s.criteria} onChange={s.updateCriteria} onReset={s.resetAll} />
+          <CriteriaScreen criteria={s.criteria} brands={s.brands} onChange={s.updateCriteria} onReset={s.resetAll} />
         )}
       </main>
       <TabBar active={tab} onChange={setTab} badge={s.matches.length} />

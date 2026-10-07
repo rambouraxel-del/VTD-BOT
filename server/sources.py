@@ -1,0 +1,137 @@
+"""Sources d'annonces du pont API.
+
+Chaque source renvoie des annonces au format du front (type `Listing` de
+src/types.ts), SANS le statut : le statut (new/matched/ignored/sold) est géré
+par le pont dans sa propre base (store.py).
+
+- MockSource : annonces fictives (mock_listings.json). Défaut.
+- S4mhSource : lit, en lecture seule, la base SQLite de s4mh/vinted-bot
+  (table `seen_listings`). Aucune requête vers Vinted.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from contextlib import closing
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Protocol
+
+HERE = Path(__file__).resolve().parent
+
+
+class ListingSource(Protocol):
+    name: str
+
+    def all(self) -> list[dict[str, Any]]: ...
+
+    def get(self, listing_id: str) -> dict[str, Any] | None: ...
+
+
+class MockSource:
+    name = "mock"
+
+    def __init__(self, path: Path = HERE / "mock_listings.json") -> None:
+        self._listings: list[dict[str, Any]] = json.loads(path.read_text("utf-8"))
+
+    def all(self) -> list[dict[str, Any]]:
+        return [dict(l) for l in self._listings]
+
+    def get(self, listing_id: str) -> dict[str, Any] | None:
+        return next((dict(l) for l in self._listings if l["id"] == listing_id), None)
+
+
+class S4mhSource:
+    """Lecture seule de la base s4mh (`data/vinted.db` par défaut).
+
+    Seules les annonces `accepted = 1` (retenues par l'analyse s4mh) sont
+    exposées : ce sont les « opportunités » que s4mh enverrait sur Discord.
+    """
+
+    name = "s4mh"
+
+    def __init__(self, db_path: str, *, accepted_only: bool = True, limit: int = 500) -> None:
+        self.db_path = db_path
+        self.accepted_only = accepted_only
+        self.limit = limit
+
+    def _connect(self) -> sqlite3.Connection:
+        # mode=ro : on ne modifie jamais la base de s4mh.
+        conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def all(self) -> list[dict[str, Any]]:
+        where = "WHERE accepted = 1" if self.accepted_only else ""
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                f"SELECT * FROM seen_listings {where} ORDER BY first_seen_at DESC LIMIT ?",
+                (self.limit,),
+            ).fetchall()
+        return [s4mh_row_to_listing(dict(r)) for r in rows]
+
+    def get(self, listing_id: str) -> dict[str, Any] | None:
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT * FROM seen_listings WHERE vinted_id = ?", (listing_id,)
+            ).fetchone()
+        return s4mh_row_to_listing(dict(row)) if row else None
+
+
+# --------------------------------------------------------------------------
+#  Correspondance s4mh (table seen_listings) -> Listing du front
+# --------------------------------------------------------------------------
+def s4mh_row_to_listing(row: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
+    price = float(row.get("price") or 0)
+    return {
+        "id": str(row["vinted_id"]),
+        "title": row.get("title") or "",
+        "brand": row.get("brand") or "",
+        "size": row.get("size") or "",
+        "condition": row.get("condition") or "",
+        "price": round(price, 2),
+        "resalePrice": round(float(row.get("resale_price") or 0), 2),
+        # s4mh calcule déjà une marge NETTE (frais acheteur, port, frais de revente).
+        "profit": round(float(row.get("profit") or 0), 2),
+        # ROI s4mh = profit / coût total (prix + frais + port), en %.
+        "roi": round(float(row.get("roi_percent") or 0)),
+        "score": max(0, min(100, round(float(row.get("score") or 0)))),
+        "imageUrl": row.get("photo_url") or "",
+        "vintedUrl": row.get("url") or "",
+        "tags": build_tags(row, now)[:3],
+    }
+
+
+def build_tags(row: dict[str, Any], now: datetime | None = None) -> list[str]:
+    """Alertes courtes calculées à partir des colonnes s4mh."""
+    tags: list[str] = []
+    level = row.get("defect_level") or "none"
+    words = (row.get("defect_words") or "").strip()
+    if level in ("confirmed", "possible"):
+        tags.append(f"⚠️ Défaut {'confirmé' if level == 'confirmed' else 'possible'}"
+                    + (f" : {words.split(',')[0]}" if words else ""))
+    age = _age_minutes(row.get("published_at"), now)
+    if age is not None and age < 60:
+        tags.append(f"⚡ Publiée il y a {max(1, age)} min")
+    rating, reviews = row.get("seller_rating"), int(row.get("seller_reviews") or 0)
+    if rating is not None and reviews >= 3:
+        tags.append(f"⭐ Vendeur {float(rating):.1f} ({reviews} avis)")
+    elif reviews < 3:
+        tags.append("🆕 Vendeur récent")
+    if float(row.get("risk") or 0) >= 50:
+        tags.append("⚠️ Risque élevé")
+    return tags
+
+
+def _age_minutes(value: Any, now: datetime | None) -> int | None:
+    if not value:
+        return None
+    try:
+        dt = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    return int((now - dt).total_seconds() // 60)

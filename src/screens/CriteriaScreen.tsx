@@ -1,7 +1,11 @@
-import { availableBrands } from '../services'
 import type { SearchCriteria } from '../types'
 
-type Props = { criteria: SearchCriteria; onChange: (c: SearchCriteria) => void; onReset: () => void }
+type Props = {
+  criteria: SearchCriteria
+  brands: string[]
+  onChange: (c: SearchCriteria) => void
+  onReset: () => void
+}
 
 type NumKey = 'maxPrice' | 'minProfit' | 'minRoi' | 'minScore'
 const sliders: { key: NumKey; label: string; min: number; max: number; step: number; unit: string }[] = [
@@ -11,7 +15,7 @@ const sliders: { key: NumKey; label: string; min: number; max: number; step: num
   { key: 'minScore', label: 'Score minimum', min: 0, max: 100, step: 5, unit: '/100' },
 ]
 
-export function CriteriaScreen({ criteria, onChange, onReset }: Props) {
+export function CriteriaScreen({ criteria, brands, onChange, onReset }: Props) {
   const set = (patch: Partial<SearchCriteria>) => onChange({ ...criteria, ...patch })
   const toggleBrand = (b: string) =>
     set({ brands: criteria.brands.includes(b) ? criteria.brands.filter((x) => x !== b) : [...criteria.brands, b] })
@@ -36,7 +40,7 @@ export function CriteriaScreen({ criteria, onChange, onReset }: Props) {
         <div className="field">
           <span>Marques {criteria.brands.length === 0 && <em className="muted">(toutes)</em>}</span>
           <div className="chips">
-            {availableBrands.map((b) => (
+            {brands.map((b) => (
               <button
                 key={b}
                 className={`chip ${criteria.brands.includes(b) ? 'on' : ''}`}

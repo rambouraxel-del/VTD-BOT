@@ -66,8 +66,7 @@ export class MockListingService implements ListingService {
     write(STATUS_KEY + '.order', [])
   }
 
-  /** Liste des marques disponibles (pour l'écran Critères). */
-  static brands(): string[] {
+  async getBrands() {
     return [...new Set(mockListings.map((l) => l.brand))].sort()
   }
 }
