@@ -18,10 +18,11 @@ import sys
 import tarfile
 import io
 
-from api import ListingApi, health, make_handler, read_api_key
-from sources import MockSource, S4mhSource, s4mh_row_to_listing
+from api import ListingApi, health, ingest, make_handler, normalize_ingested, read_api_key, read_ingest_key
+from sources import CollectorSource, MockSource, S4mhSource, s4mh_row_to_listing
 
 KEY = "k" * 40
+INGEST = "i" * 40
 FRONT = "https://app.example.test"
 from store import Store
 
@@ -109,6 +110,118 @@ class S4mhMappingTest(unittest.TestCase):
         self.assertEqual(api.matches()[0]["status"], "matched")
         with self.assertRaises(sqlite3.OperationalError):  # base s4mh jamais modifiée
             S4mhSource(str(db))._connect().execute("DELETE FROM seen_listings")
+
+
+def raw_item(i: int, **over):
+    return {"id": str(1000 + i), "title": f"Veste test {i}", "brand": "The North Face", "size": "M",
+            "condition": "Très bon état", "price": 30, "resalePrice": 75,
+            "imageUrl": "https://images.vinted.net/x.jpg",
+            "vintedUrl": f"https://www.vinted.fr/items/{1000 + i}-veste", "search": "TNF", **over}
+
+
+def make_collector_api() -> ListingApi:
+    store = Store(str(Path(tempfile.mkdtemp()) / "vtd.db"))
+    return ListingApi(CollectorSource(store), store)
+
+
+class IngestTest(unittest.TestCase):
+    def test_normalize_and_reject(self):
+        l = normalize_ingested(raw_item(1))
+        self.assertEqual((l["id"], l["price"], l["resalePrice"]), ("1001", 30.0, 75.0))
+        self.assertGreater(l["profit"], 0)
+        self.assertTrue(0 <= l["score"] <= 100)
+        for bad in (raw_item(1, id="abc"), raw_item(1, price="x"), raw_item(1, title=""),
+                    raw_item(1, vintedUrl="http://www.vinted.fr/items/1"),
+                    raw_item(1, vintedUrl="https://evil.test/items/1"), "pas un objet"):
+            self.assertIsNone(normalize_ingested(bad))
+        self.assertEqual(normalize_ingested(raw_item(1, imageUrl="javascript:alert(1)"))["imageUrl"], "")
+
+    def test_dedupe_and_keep_statuses(self):
+        api = make_collector_api()
+        r = ingest(api.store, {"listings": [raw_item(1), raw_item(2), raw_item(2), raw_item(3, id="x")]})
+        self.assertEqual(r, {"received": 4, "rejected": 2, "inserted": 2, "updated": 0})
+        api.set_status("1001", "matched")
+        api.set_status("1002", "ignored")
+        # Le collector renvoie les mêmes annonces (prix modifié) : pas de doublon, statuts intacts.
+        r = ingest(api.store, {"listings": [raw_item(1, price=25), raw_item(2), raw_item(4)]})
+        self.assertEqual((r["inserted"], r["updated"]), (1, 2))
+        self.assertEqual(api.get("1001")["status"], "matched")
+        self.assertEqual(api.get("1001")["price"], 25.0)
+        self.assertEqual(api.get("1002")["status"], "ignored")
+        self.assertEqual([l["id"] for l in api.listings("new")], ["1004"])
+        self.assertEqual(len(api.store.ingested()), 3)
+        self.assertEqual(set(api.listings("all")[0]), FRONT_KEYS)
+        self.assertIn("🔎 TNF", api.get("1004")["tags"])
+
+    def test_bad_payload(self):
+        api = make_collector_api()
+        with self.assertRaises(ValueError):
+            ingest(api.store, {"listings": "x"})
+        with self.assertRaises(ValueError):
+            ingest(api.store, {"listings": [raw_item(i) for i in range(201)]})
+
+    def test_ingest_key_rules(self):
+        os.environ["INGEST_KEY"] = KEY
+        try:
+            with self.assertRaises(SystemExit):
+                read_ingest_key(KEY)  # identique à API_KEY : refusé
+            os.environ["INGEST_KEY"] = "court"
+            with self.assertRaises(SystemExit):
+                read_ingest_key(KEY)
+            os.environ["INGEST_KEY"] = INGEST
+            self.assertEqual(read_ingest_key(KEY), INGEST)
+        finally:
+            os.environ.pop("INGEST_KEY", None)
+        self.assertEqual(read_ingest_key(KEY), "")
+
+
+class IngestHttpTest(unittest.TestCase):
+    def setUp(self):
+        handler = make_handler(make_collector_api(), api_key=KEY, cors_origins=[], ingest_key=INGEST)
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        self.base = f"http://127.0.0.1:{self.server.server_port}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+    def post(self, body, headers):
+        req = urllib.request.Request(self.base + "/api/ingest/listings", method="POST",
+                                     data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json", **headers})
+        try:
+            with urllib.request.urlopen(req) as res:
+                return res.status, json.loads(res.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read() or b"null")
+
+    def get(self, path, key):
+        req = urllib.request.Request(self.base + path, headers={"X-API-Key": key})
+        with urllib.request.urlopen(req) as res:
+            return json.loads(res.read())
+
+    def test_ingest_route(self):
+        body = {"listings": [raw_item(1), raw_item(2)]}
+        self.assertEqual(self.post(body, {})[0], 401)
+        self.assertEqual(self.post(body, {"X-API-Key": KEY})[0], 401)        # clé de l'app refusée
+        self.assertEqual(self.post(body, {"X-Ingest-Key": KEY})[0], 401)
+        code, r = self.post(body, {"X-Ingest-Key": INGEST})
+        self.assertEqual((code, r["inserted"]), (200, 2))
+        self.assertEqual(len(self.get("/api/listings", KEY)), 2)            # visible dans l'app
+        with self.assertRaises(urllib.error.HTTPError):                      # la clé d'ingestion
+            self.get("/api/listings", INGEST)                                # n'ouvre pas l'app
+        h = json.loads(urllib.request.urlopen(self.base + "/api/health").read())
+        self.assertEqual((h["source"], h["data"]["listings"]), ("collector", 2))
+
+    def test_ingest_disabled_without_key(self):
+        self.server.shutdown()
+        self.server.server_close()
+        handler = make_handler(make_collector_api(), api_key=KEY, cors_origins=[])
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        self.base = f"http://127.0.0.1:{self.server.server_port}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.assertEqual(self.post({"listings": []}, {"X-Ingest-Key": INGEST})[0], 503)
 
 
 class HttpTest(unittest.TestCase):

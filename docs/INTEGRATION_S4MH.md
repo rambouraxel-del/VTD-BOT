@@ -1,5 +1,9 @@
 # Analyse de s4mh/vinted-bot et correspondance avec VTD Deals
 
+> ⚠️ **Obsolète comme source** : Vinted a retiré l'endpoint `/api/v2/catalog/items`
+> utilisé par s4mh (404). La collecte passe désormais par le collector du PC
+> Windows ([COLLECTOR.md](COLLECTOR.md)). s4mh reste dans le projet, désactivé.
+
 Analyse du dépôt https://github.com/s4mh/vinted-bot (Python 3.11+, licence MIT).
 Aucune requête vers Vinted n'a été faite pendant cette analyse : les essais ont
 utilisé le mode test de s4mh (`--mode test`, annonces simulées, URLs `vinted.invalid`).

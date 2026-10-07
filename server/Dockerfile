@@ -8,7 +8,7 @@ ENV PYTHONUNBUFFERED=1 \
     VTD_DB=/data/vtd.db
 
 WORKDIR /app
-COPY api.py sources.py store.py backup.py mock_listings.json ./
+COPY api.py sources.py store.py scoring.py backup.py mock_listings.json ./
 
 # Utilisateur non privilégié (même uid que s4mh) ; /data = volume persistant.
 RUN adduser -D -u 1000 app && mkdir -p /data && chown app:app /data

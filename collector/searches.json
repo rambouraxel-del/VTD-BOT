@@ -1,0 +1,37 @@
+{
+  "_aide": "Recherches du collector. 'url' = lien de recherche Vinted (le plus simple : régler les filtres sur vinted.fr puis copier l'adresse). Les critères ci-dessous sont aussi vérifiés localement sur chaque annonce. 'resale_price' = prix de revente estimé (€) utilisé par le VPS pour calculer marge, ROI et score.",
+  "defaults": {
+    "sizes": ["M", "L"],
+    "max_price": 50
+  },
+  "searches": [
+    {
+      "name": "The North Face vestes/doudounes",
+      "url": "https://www.vinted.fr/catalog?search_text=the%20north%20face%20veste&price_to=50&currency=EUR&order=newest_first",
+      "brands": ["north face"],
+      "keywords": ["veste", "doudoune", "jacket", "nuptse", "puffer", "parka", "coupe-vent", "coupe vent", "down"],
+      "resale_price": 80
+    },
+    {
+      "name": "Nike vestes/doudounes vintage",
+      "url": "https://www.vinted.fr/catalog?search_text=nike%20vintage%20veste&price_to=50&currency=EUR&order=newest_first",
+      "brands": ["nike"],
+      "keywords": ["veste", "doudoune", "jacket", "puffer", "coupe-vent", "coupe vent", "windbreaker", "parka"],
+      "resale_price": 55
+    },
+    {
+      "name": "Carhartt vestes",
+      "url": "https://www.vinted.fr/catalog?search_text=carhartt%20veste&price_to=50&currency=EUR&order=newest_first",
+      "brands": ["carhartt"],
+      "keywords": ["veste", "jacket", "detroit", "chore", "active", "parka", "blouson"],
+      "resale_price": 70
+    },
+    {
+      "name": "Stüssy streetwear",
+      "url": "https://www.vinted.fr/catalog?search_text=stussy&price_to=50&currency=EUR&order=newest_first",
+      "brands": ["stussy"],
+      "keywords": [],
+      "resale_price": 50
+    }
+  ]
+}

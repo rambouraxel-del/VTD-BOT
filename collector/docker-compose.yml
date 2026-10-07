@@ -1,0 +1,55 @@
+# Collector VTD — à lancer sur le PC Windows (Docker Desktop).
+#
+#   docker compose up -d --build          # mode continu (redémarre avec Docker)
+#   docker compose run --rm collector --once --dry-run   # test : lit Vinted, n'envoie rien
+#   docker compose run --rm collector --once             # test : un passage + envoi au VPS
+#
+# Test complet en local, sans VPS (API + PWA sur ce PC) :
+#   docker compose --profile local up -d --build   puis   https://localhost:8443
+
+name: vtd-collector
+
+services:
+  collector:
+    build: .
+    image: vtd-collector
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - collector_data:/data                       # IDs déjà envoyés (persistant)
+      - ./searches.json:/app/searches.json:ro      # recherches modifiables sans rebuild
+    logging:
+      driver: json-file
+      options: { max-size: "5m", max-file: "3" }
+
+  # ---- Profil « local » : pont API + PWA sur le PC, pour tester sans VPS ----
+  api:
+    profiles: [local]
+    build: ../server
+    image: vtd-api
+    environment:
+      API_KEY: ${LOCAL_API_KEY:-local-test-api-key-0123456789abcdef}
+      INGEST_KEY: ${INGEST_KEY:-}
+      VTD_SOURCE: collector
+    volumes:
+      - local_api_data:/data
+    ports:
+      - "127.0.0.1:8787:8787"
+
+  web:
+    profiles: [local]
+    build:
+      context: ..
+      dockerfile: deploy/web.Dockerfile
+    image: vtd-web
+    depends_on: [api]
+    environment:
+      DOMAIN: localhost
+    ports:
+      - "127.0.0.1:8443:443"
+    volumes:
+      - ../deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+
+volumes:
+  collector_data:
+  local_api_data:

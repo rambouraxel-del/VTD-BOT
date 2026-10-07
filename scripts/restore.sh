@@ -9,7 +9,7 @@ FILE=${1:?Usage : ./scripts/restore.sh backups/vtd-....tar.gz}
 read -r -p "Remplacer les données actuelles par $FILE ? (oui/non) " answer
 [ "$answer" = "oui" ] || { echo "Annulé."; exit 0; }
 
-docker compose stop s4mh api
+docker compose --profile s4mh stop s4mh api
 # Copie dans les volumes avec l'image du pont (déjà présente, aucun téléchargement).
 docker run --rm -i --user 0 --entrypoint sh \
   -v vtd_s4mh_data:/s4mh -v vtd_api_data:/data vtd-api -c '
@@ -19,5 +19,6 @@ docker run --rm -i --user 0 --entrypoint sh \
     if [ -f /tmp/r/data/vtd.db ]; then cp /tmp/r/data/vtd.db /data/vtd.db; chown 1000:1000 /data/vtd.db; fi
   ' < "$FILE"
 tar xzf "$FILE" -C . ./config 2>/dev/null || true
-docker compose start s4mh api
+docker compose start api
+if grep -q '^VTD_SOURCE=s4mh' .env; then docker compose --profile s4mh start s4mh; fi
 echo "✅ Restauration terminée."

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sauvegarde à chaud : base s4mh + matchs/ignorés/critères + config s4mh.
+# Sauvegarde à chaud : annonces reçues + matchs/ignorés/critères (+ base s4mh si présente).
 # Résultat : backups/vtd-AAAA-MM-JJ_HHMM.tar.gz (les 14 dernières sont gardées).
 set -euo pipefail
 cd "$(dirname "$0")/.."

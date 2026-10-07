@@ -6,6 +6,11 @@ Un **pont API** est prêt pour brancher les annonces analysées par
 [s4mh/vinted-bot](https://github.com/s4mh/vinted-bot).
 
 **Déploiement sur VPS (Docker + HTTPS) : voir [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).**
+**Collecte Vinted depuis le PC Windows : voir [docs/COLLECTOR.md](docs/COLLECTOR.md).**
+
+Architecture actuelle :
+`PC Windows (collector) → HTTPS → VPS (API + base + PWA) → iPhone`.
+s4mh est conservé mais désactivé (l'endpoint Vinted qu'il utilisait n'existe plus).
 
 ## Lancer
 
@@ -60,6 +65,7 @@ Sur iPhone : ouvrir l'URL dans Safari → Partager → « Sur l'écran d'accueil
 | GET | `/api/matches` | matchs (et vendus), plus récents en premier |
 | GET | `/api/brands` | marques disponibles |
 | GET / PUT | `/api/criteria` | critères enregistrés |
+| POST | `/api/ingest/listings` | **collector uniquement** (en-tête `X-Ingest-Key`) : ajoute / met à jour des annonces, sans doublon, sans toucher aux statuts |
 | POST | `/api/reset` | remet tous les statuts à « new » (tests) |
 
 ## Passer du mode mock au backend
@@ -91,7 +97,8 @@ Variables du pont : `API_KEY` (obligatoire), `CORS_ORIGINS`, `VTD_SOURCE` (mock|
 
 ```bash
 npm run build                          # typecheck + build du front
-cd server && python3 -m unittest -v    # tests du pont (mock, s4mh, HTTP, clé API, CORS, sauvegarde)
+cd server && python3 -m unittest -v    # tests du pont (ingestion, mock, s4mh, HTTP, clés, CORS, sauvegarde)
+cd collector && python3 -m unittest -v # tests du collector (sans Vinted)
 docker compose config -q               # valide docker-compose.yml (nécessite un .env)
 ```
 
@@ -123,6 +130,18 @@ docker compose config -q               # valide docker-compose.yml (nécessite u
 | `scripts/` | `setup.sh`, `check.sh`, `backup.sh`, `restore.sh`, `update.sh` |
 | `server/backup.py` | sauvegarde à chaud des bases SQLite |
 | `docs/DEPLOYMENT.md` | guide de déploiement pas à pas |
+
+### Collector (PC Windows)
+
+| Fichier | |
+|---|---|
+| `collector/vinted.py` | lecture d'une page de recherche Vinted (repris d'addictcode/vinted-telegram-bot) |
+| `collector/collector.py` | filtres, IDs déjà envoyés, envoi HTTPS, pauses en cas de refus, modes one-shot / continu |
+| `collector/searches.json` | les 4 recherches (tailles M/L, prix max 50 €) |
+| `collector/docker-compose.yml`, `Dockerfile`, `.env.example` | lancement sur Windows ; profil `local` pour un test complet sur le PC |
+| `collector/fixtures/catalog_sample.txt` | page d'exemple fictive (tests sans Vinted) |
+| `server/scoring.py` | marge / ROI / score des annonces reçues |
+| `scripts/add-ingest-key.sh` | ajoute la clé du collector sur un VPS déjà installé |
 
 `src/data/mockListings.ts` est conservé comme mode de développement par défaut.
 

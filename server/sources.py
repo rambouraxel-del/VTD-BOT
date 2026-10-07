@@ -5,8 +5,11 @@ src/types.ts), SANS le statut : le statut (new/matched/ignored/sold) est géré
 par le pont dans sa propre base (store.py).
 
 - MockSource : annonces fictives (mock_listings.json). Défaut.
+- CollectorSource : annonces envoyées par le collector du PC Windows
+  (POST /api/ingest/listings), stockées dans la base du pont. Source réelle.
 - S4mhSource : lit, en lecture seule, la base SQLite de s4mh/vinted-bot
-  (table `seen_listings`). Aucune requête vers Vinted.
+  (table `seen_listings`). Désactivée par défaut (s4mh ne fonctionne plus),
+  conservée pour revenir en arrière. Aucune requête vers Vinted.
 """
 
 from __future__ import annotations
@@ -45,6 +48,44 @@ class MockSource:
 
     def get(self, listing_id: str) -> dict[str, Any] | None:
         return next((dict(l) for l in self._listings if l["id"] == listing_id), None)
+
+
+class CollectorSource:
+    """Annonces reçues du collector, lues dans la base du pont (store.py)."""
+
+    name = "collector"
+
+    def __init__(self, store: Any) -> None:
+        self.store = store
+
+    def all(self) -> list[dict[str, Any]]:
+        return [collector_view(l) for l in self.store.ingested()]
+
+    def get(self, listing_id: str) -> dict[str, Any] | None:
+        l = self.store.ingested_one(listing_id)
+        return collector_view(l) if l else None
+
+    def health(self) -> dict[str, Any]:
+        return {"db": self.store.ping(), **self.store.ingest_stats()}
+
+
+FRONT_FIELDS = ("id", "title", "brand", "size", "condition", "price", "resalePrice",
+                "profit", "roi", "score", "imageUrl", "vintedUrl")
+
+
+def collector_view(stored: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
+    """Annonce stockée -> format du front (tags calculés à la lecture)."""
+    out = {k: stored.get(k, "") for k in FRONT_FIELDS}
+    tags: list[str] = []
+    age = _age_minutes(stored.get("_first_seen_at"), now)
+    if age is not None and age < 60:
+        tags.append(f"⚡ Détectée il y a {max(1, age)} min")
+    if str(stored.get("condition", "")).lower().startswith("neuf avec"):
+        tags.append("🏷️ Neuf avec étiquette")
+    if stored.get("search"):
+        tags.append(f"🔎 {stored['search']}")
+    out["tags"] = tags[:3]
+    return out
 
 
 class S4mhSource:

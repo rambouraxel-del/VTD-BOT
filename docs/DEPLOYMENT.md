@@ -1,18 +1,19 @@
 # Déploiement sur un VPS Linux (24/7)
 
 ```
-s4mh/vinted-bot ──► base SQLite ──► pont API (clé obligatoire) ──► Caddy (HTTPS) ──► PWA iPhone
-   conteneur s4mh      volume            conteneur api               conteneur web
+PC Windows : collector ──HTTPS (INGEST_KEY)──► Caddy ──► pont API + base ──► PWA iPhone (API_KEY)
+                                              conteneur web   conteneur api
 ```
 
+La **collecte Vinted tourne sur le PC Windows** (voir [COLLECTOR.md](COLLECTOR.md)).
+Le VPS ne contacte jamais Vinted : il reçoit les annonces, les stocke et sert l'app.
 Tout se lance avec **une seule commande** (`docker compose up -d --build`).
-Par défaut, s4mh tourne en **mode test** : annonces simulées, **aucune requête vers Vinted**.
 
 | Conteneur | Rôle | Exposé sur Internet |
 |---|---|---|
-| `s4mh` | recherche + analyse des annonces (mode test par défaut) | non (dashboard sur `127.0.0.1:3000` du VPS) |
-| `api` | pont API : lit la base s4mh, stocke matchs / ignorés / critères | non (uniquement via Caddy) |
+| `api` | pont API : reçoit les annonces du collector, stocke matchs / ignorés / critères | non (uniquement via Caddy) |
 | `web` | Caddy : HTTPS automatique, sert la PWA, relaie `/api` | oui, ports 80 et 443 |
+| `s4mh` | **désactivé** (ancienne source, endpoint Vinted retiré) — profil `s4mh` | non |
 
 ## 1. Prérequis du VPS
 
@@ -67,12 +68,11 @@ Variables principales de `.env` :
 | Variable | Rôle | Valeur par défaut |
 |---|---|---|
 | `DOMAIN` | domaine du VPS (certificat HTTPS automatique) | `localhost` (test) |
-| `API_KEY` | clé secrète du pont API, **obligatoire**, ≥ 32 caractères | générée par `setup.sh` |
+| `API_KEY` | clé secrète de l'app, **obligatoire**, ≥ 32 caractères | générée par `setup.sh` |
+| `INGEST_KEY` | clé du collector (envoi des annonces), **différente** de `API_KEY` | générée par `setup.sh` |
 | `CORS_ORIGINS` | autres sites autorisés à appeler l'API (vide = même domaine) | vide |
-| `VTD_SOURCE` | `s4mh` (base s4mh) ou `mock` (12 annonces fictives) | `s4mh` |
-| `S4MH_ACCEPTED_ONLY` | `1` = seulement les annonces retenues par s4mh, `0` = toutes | `0` |
-| `S4MH_ARGS` | lancement de s4mh ; `--mode test` = simulation sans Vinted | `--mode test --no-discord` |
-| `S4MH_REF` | version (commit) de s4mh utilisée | commit testé |
+| `VTD_SOURCE` | `collector` (annonces du PC), `mock` (12 annonces fictives) ou `s4mh` (désactivé) | `collector` |
+| `S4MH_*` | réglages de s4mh, utilisés seulement avec `VTD_SOURCE=s4mh` | — |
 
 Pour modifier : `nano .env` puis `docker compose up -d`.
 
@@ -83,9 +83,23 @@ docker compose up -d --build     # 1er lancement : quelques minutes (constructio
 ./scripts/check.sh               # vérifie que tout fonctionne
 ```
 
-`check.sh` contrôle : les 3 conteneurs, `https://DOMAIN/api/health` (pont API,
-base des statuts, base s4mh lisible, dernier cycle s4mh), le refus d'une
-requête sans clé (401) et l'accès avec la clé.
+`check.sh` contrôle : les conteneurs, `https://DOMAIN/api/health` (pont API,
+base, nombre d'annonces reçues, date de la dernière réception du collector),
+le refus d'une requête sans clé (401), l'accès avec la clé et la route
+d'ingestion du collector.
+
+### VPS déjà installé avant le collector
+
+```bash
+cd ~/vtd
+git pull
+./scripts/add-ingest-key.sh        # crée INGEST_KEY, passe VTD_SOURCE=collector, redémarre le pont
+docker compose up -d --build       # reconstruit le pont (nouvelle route d'ingestion)
+docker compose --profile s4mh stop s4mh 2>/dev/null; docker compose --profile s4mh rm -f s4mh 2>/dev/null
+./scripts/check.sh
+```
+
+La clé affichée par `add-ingest-key.sh` va dans `collector/.env` sur le PC.
 
 Autres commandes utiles :
 
@@ -96,8 +110,6 @@ docker compose logs -f api web       # journaux du pont et de Caddy
 docker compose restart s4mh          # redémarrer un service
 ```
 
-Dashboard de s4mh (depuis votre ordinateur, par tunnel SSH) :
-`ssh -L 3000:127.0.0.1:3000 utilisateur@IP_DU_VPS` puis ouvrir http://localhost:3000.
 
 ## 5. Arrêt
 
@@ -132,7 +144,7 @@ https://github.com/s4mh/vinted-bot), puis `docker compose up -d --build s4mh`.
 ```
 
 - La sauvegarde est faite **à chaud** (copie cohérente même si s4mh écrit).
-  Elle contient la base s4mh, les matchs / ignorés / critères et `config/`.
+  Elle contient les annonces reçues, les matchs / ignorés / critères (et la base s4mh si elle existe).
   Les 14 dernières sont conservées.
 - Sauvegarde automatique chaque nuit à 4 h :
   ```bash
@@ -160,24 +172,24 @@ ailleurs appelle l'API : la compiler avec `VITE_DATA_SOURCE=api` et
 Changer la clé : générer une nouvelle valeur dans `.env`, `docker compose up -d api`,
 puis la saisir à nouveau sur l'iPhone (l'écran de clé réapparaît tout seul).
 
-## 9. Activation future du mode réel s4mh
+## 9. Collecte des vraies annonces
 
-**À faire seulement après validation complète en mode test, en connaissance des
-conditions d'utilisation de Vinted.** C'est s4mh seul qui contacte Vinted, avec
-ses protections (cadence, budgets, pause nocturne) ; le pont et l'app jamais.
+La collecte se fait depuis le **PC Windows** : voir [COLLECTOR.md](COLLECTOR.md).
+
+### Retour arrière vers s4mh (désactivé)
+
+s4mh ne fonctionne plus (Vinted a retiré l'endpoint `/api/v2/catalog/items`).
+Il reste dans le projet pour pouvoir revenir en arrière si besoin :
+`VTD_SOURCE=s4mh` dans `.env`, puis `docker compose --profile s4mh up -d --build`.
+Dashboard s4mh (tunnel SSH) : `ssh -L 3000:127.0.0.1:3000 utilisateur@IP_DU_VPS`.
+Réglages s4mh (anciennes instructions) :
 
 1. Récupérer et ajuster la configuration de s4mh (niches, seuils, cadence) :
    ```bash
    docker compose run --rm --no-deps --entrypoint cat s4mh config.example.yaml > config/s4mh/config.yaml
    nano config/s4mh/config.yaml
    ```
-2. Dans `.env` : `S4MH_ARGS=--mode live --no-discord` et `S4MH_ACCEPTED_ONLY=1`.
-3. Optionnel : vider les annonces simulées avant de passer en réel
-   (`./scripts/backup.sh`, puis `docker compose down`,
-   `docker volume rm vtd_s4mh_data`, `docker compose up -d`).
-4. `docker compose up -d` puis surveiller `docker compose logs -f s4mh`.
-
-Retour en simulation : remettre `S4MH_ARGS=--mode test --no-discord` puis `docker compose up -d`.
+2. Dans `.env` : `S4MH_ARGS=--mode test --no-discord` (simulation) ou `--mode live`.
 
 ## 10. Dépannage
 
@@ -185,6 +197,8 @@ Retour en simulation : remettre `S4MH_ARGS=--mode test --no-discord` puis `docke
 |---|---|
 | `API_KEY manquante` au lancement | lancer `./scripts/setup.sh` ou remplir `API_KEY` dans `.env` |
 | Pas de certificat HTTPS | DNS du domaine vers l'IP du VPS ? ports 80/443 ouverts ? `docker compose logs web` |
-| `/api/health` → `"db": false` | s4mh pas encore démarré ou en erreur : `docker compose logs s4mh` |
+| Aucune annonce dans l'app | collector lancé sur le PC ? `./scripts/check.sh` (dernière réception), `docker compose logs api` |
+| Collector : « HTTP 401 » | `INGEST_KEY` différente entre le PC et le VPS |
+| Collector : « HTTP 503 » | `INGEST_KEY` absente sur le VPS : `./scripts/add-ingest-key.sh` |
 | L'app redemande la clé | clé changée ou mal copiée : la recoller |
 | Disque plein | `docker system prune` (ne touche pas aux volumes) |
