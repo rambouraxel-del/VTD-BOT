@@ -1,0 +1,35 @@
+# Caddy obtient et renouvelle automatiquement le certificat HTTPS de {$DOMAIN}
+# (le domaine doit pointer vers l'IP du VPS, ports 80 et 443 ouverts).
+# DOMAIN=localhost → certificat local auto-signé, pour les tests.
+
+{$DOMAIN} {
+	encode zstd gzip
+
+	# API : relayée au pont (qui vérifie la clé API).
+	handle /api/* {
+		reverse_proxy api:8787
+	}
+
+	# PWA (fichiers statiques).
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+
+	@nocache path /sw.js /index.html /manifest.webmanifest
+	header @nocache Cache-Control "no-cache"
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

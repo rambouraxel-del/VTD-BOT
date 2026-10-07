@@ -225,3 +225,11 @@ main { flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: tou
   background: var(--red); color: #fff; font-size: 10.5px; font-weight: 800;
   min-width: 18px; height: 18px; border-radius: 9px; display: grid; place-items: center; padding: 0 4px;
 }
+
+.key-input {
+  font: inherit; font-size: 16px; color: var(--text); background: var(--surface);
+  border: 1px solid var(--border); border-radius: 14px; padding: 13px 14px; outline: none;
+  -webkit-user-select: text; user-select: text;
+}
+.key-input:focus { border-color: var(--accent); }
+.btn:disabled { opacity: .4; }

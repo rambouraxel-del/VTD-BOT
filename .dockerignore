@@ -1,0 +1,13 @@
+# Contexte du build de la PWA : jamais de secrets ni de données.
+.git
+.env
+.env.*
+node_modules
+dist
+server
+docs
+config
+deploy
+scripts
+backups
+*.md

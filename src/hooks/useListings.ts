@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { defaultCriteria, listingService } from '../services'
+import { AuthError, defaultCriteria, listingService } from '../services'
 import type { Listing, SearchCriteria } from '../types'
 
 /** État global de l'app. Passe uniquement par listingService (mock ou API). */
@@ -9,7 +9,7 @@ export function useListings() {
   const [criteria, setCriteria] = useState<SearchCriteria>(defaultCriteria)
   const [brands, setBrands] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<{ message: string; auth: boolean } | null>(null)
   const [lastSwiped, setLastSwiped] = useState<Listing | null>(null)
 
   const refresh = useCallback(async (c: SearchCriteria) => {
@@ -26,7 +26,7 @@ export function useListings() {
         setBrands(b)
         await refresh(c)
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e))
+        setError({ message: e instanceof Error ? e.message : String(e), auth: e instanceof AuthError })
       } finally {
         setLoading(false)
       }

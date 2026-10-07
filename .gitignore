@@ -5,3 +5,6 @@ dist
 *.tsbuildinfo
 __pycache__/
 .env.local
+backups/
+config/s4mh/config.yaml
+.env

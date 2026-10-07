@@ -12,8 +12,17 @@ from datetime import datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
-from api import ListingApi, make_handler
+import os
+import subprocess
+import sys
+import tarfile
+import io
+
+from api import ListingApi, health, make_handler, read_api_key
 from sources import MockSource, S4mhSource, s4mh_row_to_listing
+
+KEY = "k" * 40
+FRONT = "https://app.example.test"
 from store import Store
 
 FRONT_KEYS = {"id", "title", "brand", "size", "condition", "price", "resalePrice",
@@ -104,7 +113,8 @@ class S4mhMappingTest(unittest.TestCase):
 
 class HttpTest(unittest.TestCase):
     def setUp(self):
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(make_api(), "*"))
+        handler = make_handler(make_api(), api_key=KEY, cors_origins=[FRONT])
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self.base = f"http://127.0.0.1:{self.server.server_port}"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
@@ -112,19 +122,44 @@ class HttpTest(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
 
-    def call(self, method, path, body=None):
+    def call(self, method, path, body=None, key=KEY, headers=None, full=False):
+        h = {"Content-Type": "application/json", **(headers or {})}
+        if key:
+            h["X-API-Key"] = key
         req = urllib.request.Request(self.base + path, method=method,
                                      data=json.dumps(body).encode() if body is not None else None,
-                                     headers={"Content-Type": "application/json"})
+                                     headers=h)
         try:
             with urllib.request.urlopen(req) as res:
-                raw = res.read()
-                return res.status, json.loads(raw) if raw else None
+                raw, code, hdrs = res.read(), res.status, res.headers
         except urllib.error.HTTPError as e:
-            return e.code, json.loads(e.read() or b"null")
+            raw, code, hdrs = e.read(), e.code, e.headers
+        data = json.loads(raw) if raw else None
+        return (code, data, hdrs) if full else (code, data)
+
+    def test_api_key_required(self):
+        self.assertEqual(self.call("GET", "/api/listings", key=None)[0], 401)
+        self.assertEqual(self.call("GET", "/api/listings", key="mauvaise")[0], 401)
+        self.assertEqual(self.call("PATCH", "/api/listings/mock-001", {"status": "matched"}, key=None)[0], 401)
+        self.assertEqual(self.call("POST", "/api/reset", key=None)[0], 401)
+        code, _ = self.call("GET", "/api/matches", key=None, headers={"Authorization": f"Bearer {KEY}"})
+        self.assertEqual(code, 200)
+        self.assertEqual(self.call("GET", "/api/health", key=None)[0], 200)  # public
+
+    def test_cors_limited_to_frontend(self):
+        _, _, h = self.call("GET", "/api/health", headers={"Origin": FRONT}, full=True)
+        self.assertEqual(h.get("Access-Control-Allow-Origin"), FRONT)
+        _, _, h = self.call("GET", "/api/health", headers={"Origin": "https://pirate.test"}, full=True)
+        self.assertIsNone(h.get("Access-Control-Allow-Origin"))
+        code, _, h = self.call("OPTIONS", "/api/listings", key=None, headers={"Origin": FRONT}, full=True)
+        self.assertEqual((code, h.get("Access-Control-Allow-Origin")), (204, FRONT))
+
+    def test_bad_body(self):
+        self.assertEqual(self.call("PUT", "/api/criteria", [1, 2])[0], 400)
 
     def test_routes(self):
-        self.assertEqual(self.call("GET", "/api/health"), (200, {"ok": True, "source": "mock"}))
+        code, h = self.call("GET", "/api/health")
+        self.assertEqual((code, h["ok"], h["source"], h["store"]), (200, True, "mock", True))
         code, feed = self.call("GET", "/api/listings?status=new&brands=Nike,Seiko&minScore=80")
         self.assertEqual((code, sorted(l["brand"] for l in feed)), (200, ["Nike", "Seiko"]))
         code, l = self.call("PATCH", "/api/listings/mock-002", {"status": "matched"})
@@ -138,6 +173,41 @@ class HttpTest(unittest.TestCase):
         self.assertIn("Nike", self.call("GET", "/api/brands")[1])
         self.assertEqual(self.call("POST", "/api/reset")[0], 204)
         self.assertEqual(len(self.call("GET", "/api/listings")[1]), 12)
+
+
+class OpsTest(unittest.TestCase):
+    def test_api_key_mandatory(self):
+        old = os.environ.pop("API_KEY", None)
+        try:
+            with self.assertRaises(SystemExit):
+                read_api_key()
+            os.environ["API_KEY"] = "trop-courte"
+            with self.assertRaises(SystemExit):
+                read_api_key()
+            os.environ["API_KEY"] = KEY
+            self.assertEqual(read_api_key(), KEY)
+        finally:
+            os.environ.pop("API_KEY", None)
+            if old is not None:
+                os.environ["API_KEY"] = old
+
+    def test_health_when_s4mh_missing(self):
+        h = health(make_api(S4mhSource("/nulle/part/vinted.db")))
+        self.assertFalse(h["ok"])
+        self.assertFalse(h["data"]["db"])
+        self.assertEqual(make_api(S4mhSource("/nulle/part/vinted.db")).listings(), [])
+
+    def test_backup_archive(self):
+        tmp = Path(tempfile.mkdtemp())
+        Store(str(tmp / "vtd.db")).set_status("mock-001", "matched")
+        env = {**os.environ, "VTD_DB": str(tmp / "vtd.db"), "S4MH_DB": str(tmp / "absente.db")}
+        out = subprocess.run([sys.executable, "backup.py"], env=env, capture_output=True, check=True,
+                             cwd=Path(__file__).parent).stdout
+        with tarfile.open(fileobj=io.BytesIO(out)) as tar:
+            self.assertEqual(tar.getnames(), ["data/vtd.db"])
+            restored = tmp / "restored.db"
+            restored.write_bytes(tar.extractfile("data/vtd.db").read())
+        self.assertEqual(Store(str(restored)).statuses()["mock-001"][0], "matched")
 
 
 if __name__ == "__main__":

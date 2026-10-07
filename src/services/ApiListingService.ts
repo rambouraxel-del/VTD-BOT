@@ -1,6 +1,32 @@
 import type { Listing, ListingStatus, SearchCriteria } from '../types'
 import type { ListingService } from './ListingService'
 
+const KEY_STORAGE = 'vtd.apiKey'
+
+/** Erreur 401 : clé d'accès absente ou invalide. */
+export class AuthError extends Error {}
+
+/**
+ * La clé API n'est jamais intégrée au build (il est public) : l'utilisateur
+ * la saisit une fois dans l'app, elle reste sur son iPhone.
+ */
+export const apiKeyStore = {
+  get: () => {
+    try {
+      return localStorage.getItem(KEY_STORAGE) ?? ''
+    } catch {
+      return ''
+    }
+  },
+  set: (key: string) => {
+    try {
+      localStorage.setItem(KEY_STORAGE, key.trim())
+    } catch {
+      /* stockage indisponible */
+    }
+  },
+}
+
 /**
  * Implémentation HTTP de ListingService : parle au pont API (server/api.py),
  * qui lui-même lit les annonces analysées par s4mh/vinted-bot.
@@ -13,11 +39,12 @@ export class ApiListingService implements ListingService {
     try {
       res = await fetch(this.baseUrl + path, {
         ...init,
-        headers: { 'Content-Type': 'application/json', ...init?.headers },
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKeyStore.get(), ...init?.headers },
       })
     } catch {
       throw new Error(`API injoignable (${this.baseUrl || window.location.origin})`)
     }
+    if (res.status === 401) throw new AuthError("Clé d'accès manquante ou invalide")
     if (!res.ok) throw new Error(`API ${res.status} sur ${path}`)
     return (res.status === 204 ? undefined : await res.json()) as T
   }

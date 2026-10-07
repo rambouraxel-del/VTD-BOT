@@ -1,4 +1,4 @@
-import { ApiListingService } from './ApiListingService'
+import { ApiListingService, apiKeyStore, AuthError } from './ApiListingService'
 import type { ListingService } from './ListingService'
 import { MockListingService } from './MockListingService'
 
@@ -16,3 +16,4 @@ export const listingService: ListingService =
   source === 'api' ? new ApiListingService(import.meta.env.VITE_API_URL ?? '') : new MockListingService()
 
 export * from './ListingService'
+export { apiKeyStore, AuthError }

@@ -57,6 +57,14 @@ class Store:
                     (listing_id, status, datetime.now(timezone.utc).isoformat()),
                 )
 
+    def ping(self) -> bool:
+        try:
+            with self._lock:
+                self._conn.execute("SELECT 1 FROM listing_status LIMIT 1")
+            return True
+        except sqlite3.Error:
+            return False
+
     def reset(self) -> None:
         with self._lock, self._conn:
             self._conn.execute("DELETE FROM listing_status")

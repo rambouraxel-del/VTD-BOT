@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { TabBar, type Tab } from './components/TabBar'
 import { useListings } from './hooks/useListings'
+import { ApiKeyScreen } from './screens/ApiKeyScreen'
 import { CriteriaScreen } from './screens/CriteriaScreen'
 import { FeedScreen } from './screens/FeedScreen'
 import { MatchesScreen } from './screens/MatchesScreen'
@@ -14,11 +15,13 @@ export default function App() {
       <main>
         {s.loading ? (
           <div className="empty">Chargement…</div>
+        ) : s.error?.auth ? (
+          <ApiKeyScreen />
         ) : s.error ? (
           <div className="empty">
             <div className="empty-icon">📡</div>
             <h2>Serveur injoignable</h2>
-            <p>{s.error}</p>
+            <p>{s.error.message}</p>
           </div>
         ) : tab === 'feed' ? (
           <FeedScreen

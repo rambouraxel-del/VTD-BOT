@@ -1,0 +1,87 @@
+# VTD Deals — déploiement complet sur un VPS : une seule commande.
+#
+#   docker compose up -d --build
+#
+# s4mh/vinted-bot ──► base SQLite ──► pont API ──► Caddy (HTTPS) ──► PWA iPhone
+#
+# Toutes les valeurs viennent du fichier .env (voir .env.example).
+# Données persistantes = volumes nommés « vtd_* » : jamais supprimés par une
+# mise à jour ou un rebuild (seul `docker compose down -v` les efface).
+
+name: vtd
+
+services:
+  # --- Bot s4mh : recherche + analyse des annonces, écrit dans sa base SQLite.
+  s4mh:
+    build:
+      context: ./deploy/s4mh
+      additional_contexts:
+        # Code s4mh récupéré directement depuis GitHub, à une version figée.
+        s4mh_src: https://github.com/s4mh/vinted-bot.git#${S4MH_REF:-4ff42de4dfe7d43e306b743d6e00f7713ef7e811}
+    image: vtd-s4mh
+    restart: unless-stopped
+    # Par défaut : mode test = annonces SIMULÉES, aucune requête vers Vinted.
+    command: ${S4MH_ARGS:---mode test --no-discord}
+    environment:
+      TZ: ${TZ:-Europe/Paris}
+      DASHBOARD_HOST: 0.0.0.0
+      DASHBOARD_PORT: 3000
+      LOG_LEVEL: ${S4MH_LOG_LEVEL:-INFO}
+      DISCORD_TOKEN: ${DISCORD_TOKEN:-}
+    volumes:
+      - s4mh_data:/app/data
+      - s4mh_logs:/app/logs
+      # config/s4mh/config.yaml (optionnel) ; sinon config.example.yaml de s4mh.
+      - ./config/s4mh:/app/config:ro
+    ports:
+      # Dashboard s4mh : uniquement en local sur le VPS (accès par tunnel SSH).
+      - "127.0.0.1:3000:3000"
+    logging: &logging
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # --- Pont API : lit la base s4mh (lecture seule) + stocke matchs/ignorés/critères.
+  api:
+    build: ./server
+    image: vtd-api
+    restart: unless-stopped
+    depends_on: [s4mh]
+    environment:
+      API_KEY: ${API_KEY:?API_KEY manquante dans .env (voir docs/DEPLOYMENT.md)}
+      VTD_SOURCE: ${VTD_SOURCE:-s4mh}
+      S4MH_DB: /s4mh/vinted.db
+      S4MH_ACCEPTED_ONLY: ${S4MH_ACCEPTED_ONLY:-1}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      TZ: ${TZ:-Europe/Paris}
+    volumes:
+      - s4mh_data:/s4mh:ro
+      - api_data:/data
+    # Aucun port publié : seul Caddy est exposé sur Internet.
+    logging: *logging
+
+  # --- Caddy : HTTPS automatique (Let's Encrypt) + sert la PWA + /api → pont.
+  web:
+    build:
+      context: .
+      dockerfile: deploy/web.Dockerfile
+    image: vtd-web
+    restart: unless-stopped
+    depends_on: [api]
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    logging: *logging
+
+volumes:
+  s4mh_data:     # base s4mh (annonces analysées)
+  s4mh_logs:
+  api_data:      # matchs, annonces ignorées, critères
+  caddy_data:    # certificats HTTPS
+  caddy_config:

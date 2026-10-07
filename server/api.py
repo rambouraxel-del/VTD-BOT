@@ -2,15 +2,19 @@
 
 Python standard uniquement (aucune dépendance). Lancement :
 
-    python server/api.py                                   # mode mock (défaut)
-    VTD_SOURCE=s4mh S4MH_DB=../vinted-bot/data/vinted.db python server/api.py
+    API_KEY=... python server/api.py                       # mode mock (défaut)
+    API_KEY=... VTD_SOURCE=s4mh S4MH_DB=../vinted-bot/data/vinted.db python server/api.py
     (S4MH_ACCEPTED_ONLY=0 pour voir aussi les annonces rejetées par s4mh)
 
 Ce serveur ne contacte JAMAIS Vinted : il lit soit des mocks, soit la base
 SQLite déjà remplie par s4mh, et stocke les statuts dans sa propre base.
 
+Sécurité : toutes les routes (sauf /api/health) exigent l'en-tête
+`X-API-Key: <API_KEY>` (ou `Authorization: Bearer <API_KEY>`). La clé vient
+uniquement de la variable d'environnement API_KEY. CORS limité à CORS_ORIGINS.
+
 Routes (JSON) :
-    GET   /api/health
+    GET   /api/health               public : état du pont, de la base et de s4mh
     GET   /api/listings?status=new&keywords=&brands=a,b&maxPrice=&minProfit=&minRoi=&minScore=
     GET   /api/listings/{id}
     PATCH /api/listings/{id}        {"status": "new|matched|ignored|sold"}
@@ -23,6 +27,7 @@ Routes (JSON) :
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import re
@@ -117,32 +122,85 @@ def criteria_from_query(q: dict[str, list[str]]) -> dict[str, Any] | None:
 # --------------------------------------------------------------------------
 #  HTTP
 # --------------------------------------------------------------------------
-def make_handler(api: ListingApi, cors_origin: str):
+MAX_BODY = 16 * 1024  # les requêtes légitimes font quelques centaines d'octets
+MIN_KEY_LENGTH = 32
+
+
+def health(api: ListingApi) -> dict[str, Any]:
+    store_ok = api.store.ping()
+    source = api.source.health()
+    return {"ok": store_ok and source.get("db", False), "source": api.source.name,
+            "store": store_ok, "data": source}
+
+
+def make_handler(api: ListingApi, *, api_key: str, cors_origins: list[str]):
     class Handler(BaseHTTPRequestHandler):
+        server_version = "vtd-api"
+        sys_version = ""
+
         def _send(self, code: int, body: Any = None) -> None:
             data = b"" if body is None else json.dumps(body, ensure_ascii=False).encode()
             self.send_response(code)
             self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Access-Control-Allow-Origin", cors_origin)
-            self.send_header("Access-Control-Allow-Methods", "GET, PUT, PATCH, POST, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Cache-Control", "no-store")
+            origin = self.headers.get("Origin")
+            if origin and origin in cors_origins:  # CORS limité à notre frontend
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Vary", "Origin")
+                self.send_header("Access-Control-Allow-Methods", "GET, PUT, PATCH, POST, OPTIONS")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type, X-API-Key, Authorization")
+                self.send_header("Access-Control-Max-Age", "600")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
 
+        def _authorized(self) -> bool:
+            given = self.headers.get("X-API-Key") or ""
+            auth = self.headers.get("Authorization") or ""
+            if not given and auth.lower().startswith("bearer "):
+                given = auth[7:].strip()
+            return bool(given) and hmac.compare_digest(given.encode(), api_key.encode())
+
         def _json(self) -> Any:
             length = int(self.headers.get("Content-Length") or 0)
-            return json.loads(self.rfile.read(length) or b"{}")
+            if length > MAX_BODY:
+                raise ValueError("requête trop volumineuse")
+            data = json.loads(self.rfile.read(length) or b"{}")
+            if not isinstance(data, dict):
+                raise ValueError("objet JSON attendu")
+            return data
 
-        def do_OPTIONS(self) -> None:
+        def _dispatch(self, handler) -> None:
+            path = urlparse(self.path).path.rstrip("/")
+            if path == "/api/health" and self.command == "GET":
+                h = health(api)  # public : aucune donnée d'annonce
+                return self._send(200 if h["ok"] else 503, h)
+            if not self._authorized():
+                return self._send(401, {"error": "clé API manquante ou invalide"})
+            try:
+                handler()
+            except (ValueError, json.JSONDecodeError) as exc:
+                self._send(400, {"error": str(exc)})
+
+        def do_OPTIONS(self) -> None:  # pré-requête CORS : pas de clé
             self._send(204)
 
         def do_GET(self) -> None:
+            self._dispatch(self._get)
+
+        def do_PATCH(self) -> None:
+            self._dispatch(self._patch)
+
+        def do_PUT(self) -> None:
+            self._dispatch(self._put)
+
+        def do_POST(self) -> None:
+            self._dispatch(self._post)
+
+        def _get(self) -> None:
             url = urlparse(self.path)
             q = parse_qs(url.query)
             path = url.path.rstrip("/")
-            if path == "/api/health":
-                return self._send(200, {"ok": True, "source": api.source.name})
             if path == "/api/listings":
                 status = q.get("status", ["new"])[0]
                 if status != "all" and status not in STATUSES:
@@ -159,7 +217,7 @@ def make_handler(api: ListingApi, cors_origin: str):
                 return self._send(200, api.store.criteria())
             self._send(404, {"error": "route inconnue"})
 
-        def do_PATCH(self) -> None:
+        def _patch(self) -> None:
             path = urlparse(self.path).path.rstrip("/")
             if m := re.fullmatch(r"/api/listings/([^/]+)", path):
                 status = self._json().get("status")
@@ -169,19 +227,20 @@ def make_handler(api: ListingApi, cors_origin: str):
                 return self._send(200, l) if l else self._send(404, {"error": "annonce introuvable"})
             self._send(404, {"error": "route inconnue"})
 
-        def do_PUT(self) -> None:
+        def _put(self) -> None:
             if urlparse(self.path).path.rstrip("/") == "/api/criteria":
                 return self._send(200, api.store.save_criteria(self._json()))
             self._send(404, {"error": "route inconnue"})
 
-        def do_POST(self) -> None:
+        def _post(self) -> None:
             if urlparse(self.path).path.rstrip("/") == "/api/reset":
                 api.store.reset()
                 return self._send(204)
             self._send(404, {"error": "route inconnue"})
 
-        def log_message(self, fmt: str, *args: Any) -> None:  # logs plus discrets
-            print(f"[api] {self.command} {self.path} -> {args[1] if len(args) > 1 else ''}")
+        def log_message(self, fmt: str, *args: Any) -> None:  # jamais la clé dans les logs
+            print(f"[api] {self.command} {urlparse(self.path).path} -> {args[1] if len(args) > 1 else ''}",
+                  flush=True)
 
     return Handler
 
@@ -190,8 +249,6 @@ def build_api() -> ListingApi:
     source_name = os.getenv("VTD_SOURCE", "mock")
     if source_name == "s4mh":
         db = os.getenv("S4MH_DB", "../vinted-bot/data/vinted.db")
-        if not Path(db).exists():
-            raise SystemExit(f"Base s4mh introuvable : {db} (variable S4MH_DB)")
         accepted_only = os.getenv("S4MH_ACCEPTED_ONLY", "1") != "0"
         source: ListingSource = S4mhSource(db, accepted_only=accepted_only)
     else:
@@ -201,11 +258,24 @@ def build_api() -> ListingApi:
     return ListingApi(source, Store(str(store_path)))
 
 
+def read_api_key() -> str:
+    key = os.getenv("API_KEY", "").strip()
+    if len(key) < MIN_KEY_LENGTH:
+        raise SystemExit(
+            f"API_KEY absente ou trop courte (minimum {MIN_KEY_LENGTH} caractères). "
+            "Générez-en une : python3 -c \"import secrets; print(secrets.token_urlsafe(32))\""
+        )
+    return key
+
+
 def main() -> None:
+    api_key = read_api_key()
     api = build_api()
+    origins = [o.strip().rstrip("/") for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
     host, port = os.getenv("HOST", "127.0.0.1"), int(os.getenv("PORT", "8787"))
-    server = ThreadingHTTPServer((host, port), make_handler(api, os.getenv("CORS_ORIGIN", "*")))
-    print(f"Pont API VTD ({api.source.name}) sur http://{host}:{port}/api/health")
+    server = ThreadingHTTPServer((host, port), make_handler(api, api_key=api_key, cors_origins=origins))
+    print(f"Pont API VTD ({api.source.name}) sur http://{host}:{port}/api/health "
+          f"— CORS : {', '.join(origins) or 'même origine uniquement'}", flush=True)
     server.serve_forever()
 
 

@@ -28,6 +28,8 @@ class ListingSource(Protocol):
 
     def get(self, listing_id: str) -> dict[str, Any] | None: ...
 
+    def health(self) -> dict[str, Any]: ...
+
 
 class MockSource:
     name = "mock"
@@ -37,6 +39,9 @@ class MockSource:
 
     def all(self) -> list[dict[str, Any]]:
         return [dict(l) for l in self._listings]
+
+    def health(self) -> dict[str, Any]:
+        return {"db": True, "listings": len(self._listings)}
 
     def get(self, listing_id: str) -> dict[str, Any] | None:
         return next((dict(l) for l in self._listings if l["id"] == listing_id), None)
@@ -56,6 +61,9 @@ class S4mhSource:
         self.accepted_only = accepted_only
         self.limit = limit
 
+    def exists(self) -> bool:
+        return Path(self.db_path).is_file()
+
     def _connect(self) -> sqlite3.Connection:
         # mode=ro : on ne modifie jamais la base de s4mh.
         conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
@@ -63,6 +71,8 @@ class S4mhSource:
         return conn
 
     def all(self) -> list[dict[str, Any]]:
+        if not self.exists():  # s4mh pas encore démarré : aucune annonce
+            return []
         where = "WHERE accepted = 1" if self.accepted_only else ""
         with closing(self._connect()) as conn:
             rows = conn.execute(
@@ -72,11 +82,25 @@ class S4mhSource:
         return [s4mh_row_to_listing(dict(r)) for r in rows]
 
     def get(self, listing_id: str) -> dict[str, Any] | None:
+        if not self.exists():
+            return None
         with closing(self._connect()) as conn:
             row = conn.execute(
                 "SELECT * FROM seen_listings WHERE vinted_id = ?", (listing_id,)
             ).fetchone()
         return s4mh_row_to_listing(dict(row)) if row else None
+
+    def health(self) -> dict[str, Any]:
+        """Base lisible ? Dernière activité de s4mh (dernier cycle de recherche)."""
+        if not self.exists():
+            return {"db": False, "error": "base s4mh absente (s4mh pas encore lancé ?)"}
+        try:
+            with closing(self._connect()) as conn:
+                listings = conn.execute("SELECT COUNT(*) FROM seen_listings").fetchone()[0]
+                last = conn.execute("SELECT MAX(started_at) FROM cycle_stats").fetchone()[0]
+            return {"db": True, "listings": listings, "last_cycle_at": last}
+        except sqlite3.Error as exc:
+            return {"db": False, "error": str(exc)}
 
 
 # --------------------------------------------------------------------------

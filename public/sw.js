@@ -1,5 +1,5 @@
 // Service worker minimal : met en cache l'app pour un usage hors ligne.
-const CACHE = 'vtd-deals-v1'
+const CACHE = 'vtd-deals-v2'
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((c) => c.addAll(['./', './manifest.webmanifest'])))
@@ -15,7 +15,9 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
   const req = event.request
-  if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return
+  const url = new URL(req.url)
+  // Jamais de cache pour l'API (données à jour, clé d'accès).
+  if (req.method !== 'GET' || url.origin !== self.location.origin || url.pathname.includes('/api/')) return
   // Réseau d'abord, cache en secours.
   event.respondWith(
     fetch(req)
