@@ -33,3 +33,11 @@
 		format console
 	}
 }
+
+# Brain — API personnelle (hostname gratuit sslip.io).
+# Le conteneur brain-api est sur le reseau Docker externe vtd_default.
+# Ce bloc s'ajoute sans modifier le site VTD-BOT / Polar Rift.
+brain-api-57-129-178-40.sslip.io {
+	encode zstd gzip
+	reverse_proxy brain-api:8787
+}
